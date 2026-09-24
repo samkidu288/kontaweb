@@ -1,0 +1,7 @@
+{
+  "name": "WebRTC Video Call & VPS Ubuntu Deployment Guide",
+  "description": "Aplikasi WebRTC Video Call sederhana dengan server signaling Socket.io, kode server.js & index.html siap pakai, serta panduan deployment lengkap ke VPS Ubuntu.",
+  "requestFramePermissions": ["camera", "microphone", "display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

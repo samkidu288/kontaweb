@@ -395,7 +395,7 @@ export const TwoScreenVideoCall: React.FC<TwoScreenVideoCallProps> = ({
           )}
 
           {/* Local Video PIP (Kamera Anda di Sudut Kanan Atas) */}
-          <div className="absolute top-4 right-4 w-28 h-40 sm:w-32 sm:h-44 bg-slate-900 rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-700/80 z-20">
+          <div className="absolute bottom-20 right-4 w-28 h-40 sm:w-32 sm:h-44 bg-slate-900 rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-700/80 z-20">
             <video
               ref={localVideoRef}
               autoPlay

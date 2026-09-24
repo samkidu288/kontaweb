@@ -1,495 +1,621 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Camera, 
-  CameraOff, 
-  Mic, 
-  MicOff, 
-  PhoneOff, 
-  RotateCcw,
-  ShieldCheck,
-  Volume2,
-  VolumeX,
-  Copy,
-  Check,
-  Maximize2,
-  Minimize2
-} from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
-import { Header } from './Header';
-import { AudioVisualizer } from './AudioVisualizer';
+import { 
+  Camera, CameraOff, Mic, MicOff, PhoneOff,
+  Smartphone, RefreshCw, Sparkles, ArrowLeft,
+  ArrowUpDown
+} from 'lucide-react';
 
-interface TwoScreenVideoCallProps {
-  userRole: 'left' | 'right';
-  onSwitchRole: () => void;
+interface VideoCallProps {
+  role: 'left' | 'right';
+  onExit: () => void;
+  onStatusChange?: (status: string, connected: boolean) => void;
 }
 
-export const TwoScreenVideoCall: React.FC<TwoScreenVideoCallProps> = ({
-  userRole,
-  onSwitchRole
-}) => {
-  const [isCallActive, setIsCallActive] = useState(false);
-  const [isAudioMuted, setIsAudioMuted] = useState(false);
-  const [isVideoOff, setIsVideoOff] = useState(false);
-  const [isRemoteAudioMuted, setIsRemoteAudioMuted] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState<string>('Memulai sinyal...');
-  const [isOtherPeerOnline, setIsOtherPeerOnline] = useState(false);
-  const [isBothOnline, setIsBothOnline] = useState(false);
-  const [copyFeedback, setCopyFeedback] = useState(false);
-  const [networkQuality, setNetworkQuality] = useState<'Baik' | 'Sedang' | 'Buruk'>('Baik');
-  const [callDuration, setCallDuration] = useState(0);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isCopied, setIsCopied] = useState(false);
-  const [isFlipped, setIsFlipped] = useState(false);
-  const [isMobileDevice, setIsMobileDevice] = useState(false);
-  const [isWideFit, setIsWideFit] = useState(true); // Default true agar gambar kamera luas tidak terpotong
+export const TwoScreenVideoCall: React.FC<VideoCallProps> = ({ role, onExit, onStatusChange }) => {
+  const [, setLeftOnline] = useState(false);
+  const [, setRightOnline] = useState(false);
+  const [isP2PConnected, setIsP2PConnected] = useState(false);
+  const [callStatus, setCallStatus] = useState<string>('Menghubungkan...');
 
-  const socketRef = useRef<Socket | null>(null);
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
+  // Media Controls
+  const [hasMedia, setHasMedia] = useState(false);
+  const [isSimulatedStream, setIsSimulatedStream] = useState(false);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isCamOff, setIsCamOff] = useState(false);
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+
+  // Swap view state (apakah video lokal di Main atau di PiP)
+  const [isSwappedView, setIsSwappedView] = useState(false);
+
+  // Video Refs
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const animFrameRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    const checkMobile = () => {
-      const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera;
-      setIsMobileDevice(/android|ipad|iphone|ipod/i.test(userAgent.toLowerCase()));
-    };
-    checkMobile();
-  }, []);
+  // WebRTC & Socket Refs
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
 
-  const partnerRole = userRole === 'left' ? 'right' : 'left';
-  const roleName = userRole === 'left' ? 'Peserta 1' : 'Peserta 2';
-  const partnerRoleName = partnerRole === 'left' ? 'Peserta 1' : 'Peserta 2';
+  const updateCallState = (status: string, connected: boolean) => {
+    setCallStatus(status);
+    if (onStatusChange) {
+      onStatusChange(status, connected);
+    }
+  };
 
+  // Konfigurasi STUN Server untuk koneksi P2P lintas jaringan
   const rtcConfig: RTCConfiguration = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' }
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' }
     ]
   };
 
-  useEffect(() => {
-    if (isBothOnline && isCallActive) {
-      timerRef.current = setInterval(() => {
-        setCallDuration((prev) => prev + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-      setCallDuration(0);
-    }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [isBothOnline, isCallActive]);
+  // Inisialisasi Akses Kamera & Mikrofon dengan Preferensi Portrait 9:16
+  const initMedia = async (forceVirtual = false, targetFacing = facingMode) => {
+    stopCurrentStream();
 
-  const formatDuration = (secs: number) => {
-    const mins = Math.floor(secs / 60);
-    const remainingSecs = secs % 60;
-    return `${mins.toString().padStart(2, '0')}:${remainingSecs.toString().padStart(2, '0')}`;
-  };
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const startMedia = async () => {
+    if (!forceVirtual) {
       try {
-        setErrorMessage(null);
-        if (localStreamRef.current) {
-          localStreamRef.current.getTracks().forEach((track) => track.stop());
-        }
-
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: 'user',
-            width: { ideal: 1920, min: 640 },
-            height: { ideal: 1080, min: 480 },
-            frameRate: { ideal: 30, max: 30 }
+          video: { 
+            facingMode: targetFacing,
+            width: { ideal: 720 }, 
+            height: { ideal: 1280 },
+            aspectRatio: { ideal: 9 / 16 }
           },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
+          audio: true
         });
 
-        // Paksa zoom kamera HP ke tingkat minimum (terlebar/ultrawide jika ada)
-        const videoTrack = stream.getVideoTracks()[0];
-        if (videoTrack && typeof videoTrack.getCapabilities === 'function') {
-          try {
-            const capabilities = videoTrack.getCapabilities() as { zoom?: { min: number; max: number } };
-            if (capabilities.zoom && typeof capabilities.zoom.min === 'number') {
-              await (videoTrack as any).applyConstraints({
-                advanced: [{ zoom: capabilities.zoom.min }]
-              });
-            }
-          } catch {
-            // Abaikan jika browser tidak mengizinkan akses hardware zoom
-          }
-        }
-
         localStreamRef.current = stream;
-
-        if (localVideoRef.current && isMounted) {
-          localVideoRef.current.srcObject = stream;
-        }
-
-        if (pcRef.current) {
-          const senders = pcRef.current.getSenders();
-          stream.getTracks().forEach((track) => {
-            const sender = senders.find((s) => s.track && s.track.kind === track.kind);
-            if (sender) {
-              sender.replaceTrack(track);
-            } else {
-              pcRef.current?.addTrack(track, stream);
-            }
-          });
-        }
-      } catch (err: any) {
-        console.error('Gagal mengakses kamera/mikrofon:', err);
-        if (isMounted) {
-          setErrorMessage(
-            err.name === 'NotAllowedError'
-              ? 'Izin kamera dan mikrofon ditolak. Berikan izin di browser Anda.'
-              : 'Perangkat kamera/mikrofon tidak terdeteksi atau sedang dipakai aplikasi lain.'
-          );
-        }
+        assignLocalStream(stream);
+        setHasMedia(true);
+        setIsSimulatedStream(false);
+        setIsCamOff(false);
+        setIsMicMuted(false);
+        return stream;
+      } catch (err) {
+        console.warn('Gagal akses kamera fisik, beralih ke simulasi visual portrait:', err);
       }
+    }
+
+    return startVirtualStream();
+  };
+
+  const assignLocalStream = (stream: MediaStream) => {
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = stream;
+    }
+  };
+
+  const assignRemoteStream = (stream: MediaStream) => {
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = stream;
+    }
+  };
+
+  // Fallback virtual feed portrait (360x640)
+  const startVirtualStream = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 360;
+    canvas.height = 640;
+    const ctx = canvas.getContext('2d');
+    canvasRef.current = canvas;
+
+    let frame = 0;
+    const draw = () => {
+      if (!ctx) return;
+      frame++;
+      
+      const grad = ctx.createLinearGradient(0, 0, 360, 640);
+      grad.addColorStop(0, '#0f172a');
+      grad.addColorStop(1, '#1e293b');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 360, 640);
+
+      // Pulsing Circle
+      ctx.beginPath();
+      const radius = 45 + Math.sin(frame * 0.06) * 10;
+      ctx.arc(180, 260, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = role === 'left' ? '#38bdf8' : '#34d399';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // Avatar
+      ctx.beginPath();
+      ctx.arc(180, 250, 30, 0, Math.PI * 2);
+      ctx.fillStyle = role === 'left' ? '#38bdf8' : '#34d399';
+      ctx.fill();
+
+      // Text
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(role === 'left' ? 'Peserta 1' : 'Peserta 2', 180, 340);
+      
+      ctx.font = '12px monospace';
+      ctx.fillStyle = '#94a3b8';
+      const timeStr = new Date().toTimeString().split(' ')[0];
+      ctx.fillText(`${timeStr} • Live 9:16`, 180, 370);
+
+      animFrameRef.current = requestAnimationFrame(draw);
     };
 
-    startMedia();
+    draw();
 
-    return () => {
-      isMounted = false;
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-      }
-    };
-  }, []);
+    const canvasStream = canvas.captureStream(30);
 
-  const createPeerConnection = () => {
-    if (pcRef.current) {
-      pcRef.current.close();
+    try {
+      const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0.0001;
+      osc.connect(gain);
+      const dest = audioCtx.createMediaStreamDestination();
+      gain.connect(dest);
+      osc.start();
+
+      dest.stream.getAudioTracks().forEach(track => canvasStream.addTrack(track));
+    } catch {
+      // Audio fallback
+    }
+
+    localStreamRef.current = canvasStream;
+    assignLocalStream(canvasStream);
+    setHasMedia(true);
+    setIsSimulatedStream(true);
+    return canvasStream;
+  };
+
+  const stopCurrentStream = () => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+    }
+    setHasMedia(false);
+  };
+
+  // Setup WebRTC Peer Connection
+  const setupPeerConnection = (socket: Socket): RTCPeerConnection => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
     }
 
     const pc = new RTCPeerConnection(rtcConfig);
-    pcRef.current = pc;
+    peerConnectionRef.current = pc;
 
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        pc.addTrack(track, localStreamRef.current!);
+      localStreamRef.current.getTracks().forEach(track => {
+        if (localStreamRef.current) {
+          pc.addTrack(track, localStreamRef.current);
+        }
       });
     }
 
     pc.ontrack = (event) => {
-      if (remoteVideoRef.current && event.streams[0]) {
-        remoteVideoRef.current.srcObject = event.streams[0];
+      console.log('[WebRTC] Menerima remote track:', event.track.kind);
+      if (event.streams[0]) {
+        remoteStreamRef.current = event.streams[0];
+        assignRemoteStream(event.streams[0]);
+        setIsP2PConnected(true);
+        updateCallState('Terhubung', true);
       }
     };
 
     pc.onicecandidate = (event) => {
-      if (event.candidate && socketRef.current) {
-        socketRef.current.emit('ice-candidate', { candidate: event.candidate });
+      if (event.candidate) {
+        socket.emit('ice-candidate', { candidate: event.candidate });
       }
     };
 
     pc.onconnectionstatechange = () => {
-      if (!pc) return;
-      switch (pc.connectionState) {
-        case 'connected':
-          setConnectionStatus('Terhubung');
-          setIsCallActive(true);
-          setNetworkQuality('Baik');
-          break;
-        case 'disconnected':
-        case 'failed':
-          setConnectionStatus('Sambungan Terputus');
-          setIsCallActive(false);
-          setNetworkQuality('Buruk');
-          break;
-        case 'connecting':
-          setConnectionStatus('Menghubungkan P2P...');
-          break;
+      console.log('[WebRTC] Connection state:', pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        setIsP2PConnected(true);
+        updateCallState('Terhubung', true);
+      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        setIsP2PConnected(false);
+        updateCallState('Terputus', false);
       }
     };
 
     return pc;
   };
 
-  useEffect(() => {
-    const socket: Socket = io();
+  // Hubungkan ke Socket.io signaling
+  const connectSignaling = (roleToRegister: 'left' | 'right') => {
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+    }
+
+    const socket = io({
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5
+    });
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      socket.emit('register-peer', { role: userRole });
+      console.log(`[Socket] Terhubung sebagai ${roleToRegister === 'left' ? 'Peserta 1' : 'Peserta 2'}`);
+      socket.emit('register-peer', { role: roleToRegister });
+      updateCallState(roleToRegister === 'left' ? 'Menunggu Peserta 2...' : 'Menunggu Peserta 1...', false);
     });
 
-    socket.on('peer-status', ({ leftOnline, rightOnline, bothOnline }) => {
-      const partnerOnline = userRole === 'left' ? rightOnline : leftOnline;
-      setIsOtherPeerOnline(partnerOnline);
-      setIsBothOnline(bothOnline);
+    socket.on('peer-status', ({ leftOnline: lOnline, rightOnline: rOnline, bothOnline }: { leftOnline: boolean; rightOnline: boolean; bothOnline: boolean }) => {
+      setLeftOnline(lOnline);
+      setRightOnline(rOnline);
 
-      if (!partnerOnline) {
-        setConnectionStatus(`Menunggu ${partnerRoleName} membuka link...`);
-        setIsCallActive(false);
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = null;
-        }
-      } else if (bothOnline && !isCallActive) {
-        setConnectionStatus('Mempersiapkan saluran...');
+      if (bothOnline) {
+        updateCallState('Menghubungkan Video...', false);
+      } else if (roleToRegister === 'left' && !rOnline) {
+        updateCallState('Menunggu Peserta 2 masuk...', false);
+      } else if (roleToRegister === 'right' && !lOnline) {
+        updateCallState('Menunggu Peserta 1 masuk...', false);
       }
     });
 
+    // Pihak 'left' diinstruksikan server untuk membuat offer
     socket.on('start-handshake', async () => {
-      if (userRole === 'left') {
-        const pc = createPeerConnection();
+      console.log('[WebRTC] Memulai handshake...');
+      updateCallState('Menghubungkan sinyal...', false);
+
+      const pc = setupPeerConnection(socket);
+      try {
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true
+        });
+        await pc.setLocalDescription(offer);
+        socket.emit('offer', { offer });
+      } catch (err) {
+        console.error('[WebRTC] Gagal createOffer:', err);
+      }
+    });
+
+    // Menerima Offer (Pihak Right / Receiver)
+    socket.on('offer', async (data: { offer: RTCSessionDescriptionInit }) => {
+      console.log('[WebRTC] Menerima offer...');
+      updateCallState('Menerima panggilan...', false);
+
+      const pc = setupPeerConnection(socket);
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('answer', { answer });
+      } catch (err) {
+        console.error('[WebRTC] Gagal createAnswer:', err);
+      }
+    });
+
+    // Menerima Answer
+    socket.on('answer', async (data: { answer: RTCSessionDescriptionInit }) => {
+      if (peerConnectionRef.current) {
         try {
-          const offer = await pc.createOffer({
-            offerToReceiveAudio: true,
-            offerToReceiveVideo: true
-          });
-          await pc.setLocalDescription(offer);
-          socket.emit('offer', { offer });
-          setConnectionStatus('Mengirim panggilan...');
-        } catch (e) {
-          console.error('Gagal membuat offer WebRTC:', e);
+          await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+        } catch (err) {
+          console.error('[WebRTC] Gagal setRemoteDescription answer:', err);
         }
       }
     });
 
-    socket.on('offer', async ({ offer }) => {
-      if (userRole === 'right') {
-        const pc = createPeerConnection();
+    // Menerima ICE Candidate
+    socket.on('ice-candidate', async (data: { candidate: RTCIceCandidateInit }) => {
+      if (peerConnectionRef.current) {
         try {
-          await pc.setRemoteDescription(new RTCSessionDescription(offer));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          socket.emit('answer', { answer });
-          setConnectionStatus('Menerima panggilan...');
-        } catch (e) {
-          console.error('Gagal merespon offer WebRTC:', e);
+          await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (err) {
+          console.error('[WebRTC] Gagal addIceCandidate:', err);
         }
       }
     });
 
-    socket.on('answer', async ({ answer }) => {
-      if (userRole === 'left' && pcRef.current) {
-        try {
-          await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-          setConnectionStatus('Terhubung');
-        } catch (e) {
-          console.error('Gagal memasang remote answer WebRTC:', e);
-        }
-      }
-    });
-
-    socket.on('ice-candidate', async ({ candidate }) => {
-      if (pcRef.current && candidate) {
-        try {
-          await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch (e) {
-          console.error('Gagal menambahkan ICE candidate:', e);
-        }
-      }
-    });
-
+    // Lawan bicara keluar
     socket.on('peer-disconnected', () => {
-      setIsOtherPeerOnline(false);
-      setIsBothOnline(false);
-      setIsCallActive(false);
-      setConnectionStatus(`${partnerRoleName} keluar dari obrolan`);
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = null;
       }
+      remoteStreamRef.current = null;
+      setIsP2PConnected(false);
+      updateCallState('Lawan bicara keluar', false);
+    });
+  };
+
+  const toggleMic = () => {
+    if (localStreamRef.current) {
+      const audioTracks = localStreamRef.current.getAudioTracks();
+      if (audioTracks.length > 0) {
+        const nextState = !isMicMuted;
+        audioTracks.forEach(t => (t.enabled = !nextState));
+        setIsMicMuted(nextState);
+      }
+    }
+  };
+
+  const toggleCam = () => {
+    if (localStreamRef.current) {
+      const videoTracks = localStreamRef.current.getVideoTracks();
+      if (videoTracks.length > 0) {
+        const nextState = !isCamOff;
+        videoTracks.forEach(t => (t.enabled = !nextState));
+        setIsCamOff(nextState);
+      }
+    }
+  };
+
+  // Balik kamera depan / belakang (HP)
+  const switchCameraFacing = async () => {
+    const nextFacing = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(nextFacing);
+    const newStream = await initMedia(false, nextFacing);
+    
+    if (newStream && peerConnectionRef.current) {
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      const sender = peerConnectionRef.current.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender && newVideoTrack) {
+        sender.replaceTrack(newVideoTrack);
+      }
+    }
+  };
+
+  const handleExitCall = () => {
+    stopCurrentStream();
+    if (socketRef.current) {
+      socketRef.current.emit('leave-call');
+      socketRef.current.disconnect();
+    }
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+    }
+    onExit();
+  };
+
+  // Re-attach streams saat swapping view
+  useEffect(() => {
+    if (isSwappedView) {
+      // Main = Local, PiP = Remote
+      if (localVideoRef.current && localStreamRef.current) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+      }
+      if (remoteVideoRef.current && remoteStreamRef.current) {
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+    } else {
+      // Main = Remote, PiP = Local
+      if (remoteVideoRef.current && remoteStreamRef.current) {
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+      if (localVideoRef.current && localStreamRef.current) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+      }
+    }
+  }, [isSwappedView]);
+
+  useEffect(() => {
+    initMedia(false).then(() => {
+      connectSignaling(role);
     });
 
     return () => {
-      socket.emit('leave-call');
-      socket.disconnect();
-      if (pcRef.current) {
-        pcRef.current.close();
+      stopCurrentStream();
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.close();
       }
     };
-  }, [userRole]);
+  }, [role]);
 
-  const toggleAudio = () => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach((track) => {
-        track.enabled = !track.enabled;
-      });
-      setIsAudioMuted(!isAudioMuted);
-    }
-  };
-
-  const toggleVideo = () => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach((track) => {
-        track.enabled = !track.enabled;
-      });
-      setIsVideoOff(!isVideoOff);
-    }
-  };
-
-  const toggleRemoteAudio = () => {
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.muted = !isRemoteAudioMuted;
-      setIsRemoteAudioMuted(!isRemoteAudioMuted);
-    }
-  };
-
-  const copyPartnerLink = () => {
-    const url = new URL(window.location.href);
-    url.searchParams.set('role', partnerRole);
-    navigator.clipboard.writeText(url.toString());
-    setCopyFeedback(true);
-    setIsCopied(true);
-    setTimeout(() => {
-      setCopyFeedback(false);
-      setIsCopied(false);
-    }, 2500);
-  };
+  const otherRoleName = role === 'left' ? 'Peserta 2' : 'Peserta 1';
+  const currentRoleName = role === 'left' ? 'Peserta 1' : 'Peserta 2';
 
   return (
-    <div className="flex flex-col items-center justify-center w-full min-h-[calc(100vh-80px)] px-3 py-4 md:py-6">
-      {errorMessage && (
-        <div className="w-full max-w-md mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-300 text-xs text-center backdrop-blur-sm">
-          {errorMessage}
-        </div>
-      )}
-
-      {/* Kontainer Video Portrait Smartphone 9:16 */}
-      <div className="relative w-full aspect-[9/16] max-h-[82vh] max-w-[460px] bg-slate-950 rounded-3xl overflow-hidden shadow-2xl border border-slate-800 flex flex-col">
-        {/* Remote Video (Layar Penuh Lawan Bicara) */}
-        <div className="absolute inset-0 bg-slate-950 flex items-center justify-center overflow-hidden">
-          <video
-            ref={remoteVideoRef}
-            autoPlay
-            playsInline
-            className={`w-full h-full transform -scale-x-100 transition-all duration-300 ${
-              isWideFit ? 'object-contain' : 'object-cover'
-            }`}
-          />
-
-          {/* Standby State Jika Lawan Belum Masuk */}
-          {!isBothOnline && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-slate-950/85 backdrop-blur-md z-10">
-              <div className="w-16 h-16 rounded-full bg-sky-500/10 border border-sky-500/30 flex items-center justify-center mb-4">
-                <span className="relative flex h-4 w-4">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-4 w-4 bg-sky-500"></span>
-                </span>
-              </div>
-              <h3 className="text-base font-semibold text-white mb-1.5">{connectionStatus}</h3>
-              <p className="text-slate-400 text-xs max-w-xs mb-6 leading-relaxed">
-                Bagikan link berikut ke HP rekan Anda untuk langsung terhubung otomatis:
-              </p>
-              <button
-                onClick={copyPartnerLink}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-medium shadow-lg shadow-sky-500/25 transition cursor-pointer active:scale-95"
-              >
-                {copyFeedback ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                <span>{copyFeedback ? 'Link Berhasil Disalin!' : `Salin Link ${partnerRoleName}`}</span>
-              </button>
-            </div>
+    <div className="flex flex-col items-center justify-center w-full min-h-[calc(100dvh-75px)] py-1">
+      
+      {/* KONTINER UTAMA RASIO PORTRAIT 9:16 (Seperti Layar Smartphone) */}
+      <div className="relative w-full max-w-[400px] aspect-[9/16] max-h-[88vh] bg-black rounded-3xl overflow-hidden shadow-2xl border border-slate-800 flex flex-col justify-between select-none">
+        
+        {/* ========================================================= */}
+        {/* 1. LAYAR UTAMA (Background Full Portrait 9:16)            */}
+        {/* Menampilkan Lawan Bicara (Remote Video)                   */}
+        {/* ========================================================= */}
+        <div className="absolute inset-0 z-0 bg-slate-950 flex items-center justify-center overflow-hidden">
+          {!isSwappedView ? (
+            // Default: Layar Utama = Lawan Bicara
+            <>
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className="w-full h-full object-cover"
+              />
+              
+              {!isP2PConnected && (
+                <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center text-center p-6 space-y-3">
+                  <div className="w-16 h-16 rounded-3xl bg-slate-900 border border-slate-800 flex items-center justify-center shadow-xl">
+                    <Smartphone className="w-8 h-8 text-emerald-400 animate-pulse" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-base font-bold text-slate-100">
+                      Menunggu {otherRoleName}
+                    </h3>
+                    <p className="text-xs text-slate-400 max-w-xs leading-relaxed">
+                      Menunggu lawan bicara masuk dan terhubung...
+                    </p>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            // Jika Swapped: Layar Utama = Kamera Lokal Anda
+            <>
+              <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className={`w-full h-full object-cover ${facingMode === 'user' ? '-scale-x-100' : ''}`}
+              />
+              {(!hasMedia || isCamOff) && (
+                <div className="absolute inset-0 bg-slate-950 flex flex-col items-center justify-center text-slate-400 gap-2">
+                  <CameraOff className="w-10 h-10 text-slate-600" />
+                  <p className="text-xs font-medium">Kamera Anda Dimatikan</p>
+                </div>
+              )}
+            </>
           )}
 
-          {/* Local Video PIP (Kamera Anda di Sudut Kanan Atas) */}
-          <div className="absolute bottom-20 right-4 w-28 h-40 sm:w-32 sm:h-44 bg-slate-900 rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-700/80 z-20">
+          {/* Label Nama Peserta di Layar Utama */}
+          <div className="absolute top-14 left-4 z-10">
+            <div className="flex items-center gap-1.5 bg-black/60 backdrop-blur-md px-3 py-1 rounded-full text-[11px] font-medium text-slate-200 border border-white/10">
+              <span className={`w-2 h-2 rounded-full ${isP2PConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              <span>{!isSwappedView ? otherRoleName : `${currentRoleName} (Anda)`}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* ========================================================= */}
+        {/* 2. KAMERA LOKAL PiP (Floating Overlay di Kanan Bawah)       */}
+        {/* ========================================================= */}
+        <div 
+          onClick={() => setIsSwappedView(!isSwappedView)}
+          className="absolute bottom-22 right-4 z-20 w-28 sm:w-32 aspect-[9/16] bg-slate-900 rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-700/80 cursor-pointer transition transform hover:scale-105 active:scale-95 group"
+          title="Klik untuk menukar tampilan layar"
+        >
+          {isSwappedView ? (
+            // Jika Swapped: PiP = Lawan Bicara
             <video
-              ref={localVideoRef}
+              ref={remoteVideoRef}
               autoPlay
               playsInline
-              muted
-              className={`w-full h-full transform -scale-x-100 transition-all duration-300 ${
-                isWideFit ? 'object-contain' : 'object-cover'
-              }`}
+              className="w-full h-full object-cover"
             />
-            {isVideoOff && (
-              <div className="absolute inset-0 bg-slate-900 flex flex-col items-center justify-center text-slate-400 text-[10px]">
-                <CameraOff className="w-5 h-5 mb-1" />
-                <span>Kamera Mati</span>
-              </div>
-            )}
-            <div className="absolute bottom-1.5 left-2 px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-sm text-[10px] text-white font-medium">
-              Anda ({roleName})
-            </div>
+          ) : (
+            // Default: PiP = Kamera Lokal Anda Sendiri
+            <>
+              <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className={`w-full h-full object-cover ${facingMode === 'user' ? '-scale-x-100' : ''}`}
+              />
+              {(!hasMedia || isCamOff) && (
+                <div className="absolute inset-0 bg-slate-950 flex flex-col items-center justify-center text-slate-500">
+                  <CameraOff className="w-6 h-6" />
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Badge & Swap Icon di PiP */}
+          <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center justify-between px-1.5 py-0.5 bg-black/70 backdrop-blur-sm rounded-md text-[9px] text-white">
+            <span className="font-semibold truncate">
+              {isSwappedView ? otherRoleName : 'Anda'}
+            </span>
+            <ArrowUpDown className="w-3 h-3 text-sky-400 opacity-70 group-hover:opacity-100" />
           </div>
 
-          {/* Top Bar Info Status & Durasi */}
-          <div className="absolute top-4 left-4 z-20 flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/50 backdrop-blur-md border border-white/10 text-white text-xs">
-              <span className={`w-2 h-2 rounded-full ${isBothOnline ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
-              <span className="font-medium">{roleName}</span>
-              {isBothOnline && <span className="font-mono text-slate-300 ml-1">| {formatDuration(callDuration)}</span>}
+          {isMicMuted && (
+            <div className="absolute top-1.5 right-1.5 bg-rose-500 text-white p-1 rounded-full shadow">
+              <MicOff className="w-2.5 h-2.5" />
             </div>
+          )}
+        </div>
+
+        {/* ========================================================= */}
+        {/* 3. TOP BAR OVERLAY                                        */}
+        {/* ========================================================= */}
+        <div className="relative z-30 p-3.5 flex items-center justify-between bg-gradient-to-b from-black/80 via-black/40 to-transparent">
+          <button
+            onClick={handleExitCall}
+            className="px-2.5 py-1.5 rounded-xl bg-slate-900/80 hover:bg-slate-800 text-slate-200 border border-slate-700/80 backdrop-blur-md transition cursor-pointer flex items-center gap-1 text-xs font-semibold"
+            title="Keluar ke Menu Utama"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span className="text-[11px]">Menu</span>
+          </button>
+
+          <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900/80 border border-slate-700/80 backdrop-blur-md text-[11px] text-slate-300">
+            <span className={`w-2 h-2 rounded-full ${isP2PConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+            <span className="font-medium truncate max-w-[140px]">{callStatus}</span>
           </div>
         </div>
 
-        {/* Toolbar Kontrol Bawah */}
-        <div className="absolute bottom-4 left-4 right-4 z-20 flex items-center justify-center gap-3 p-3 rounded-2xl bg-black/60 backdrop-blur-lg border border-white/10 shadow-xl">
-          {/* Toggle Wide View (Luas / Layar Penuh) */}
-          <button
-            onClick={() => setIsWideFit((prev) => !prev)}
-            className={`p-3 rounded-full transition cursor-pointer ${
-              isWideFit
-                ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40 hover:bg-sky-500/30'
-                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'
-            }`}
-            title={isWideFit ? 'Tampilan: Luas (Lensa Penuh)' : 'Tampilan: Penuh (Terpotong)'}
-          >
-            {isWideFit ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
-          </button>
+        {/* ========================================================= */}
+        {/* 4. BOTTOM FLOATING CONTROLS                               */}
+        {/* ========================================================= */}
+        <div className="relative z-30 p-3.5 bg-gradient-to-t from-black/90 via-black/50 to-transparent flex items-center justify-center">
+          <div className="flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 backdrop-blur-xl px-4 py-2 rounded-full shadow-2xl">
+            
+            {/* Mic Toggle */}
+            <button
+              onClick={toggleMic}
+              className={`w-10 h-10 rounded-full flex items-center justify-center transition cursor-pointer border ${
+                isMicMuted
+                  ? 'bg-rose-500/20 text-rose-400 border-rose-500/40 hover:bg-rose-500/30'
+                  : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
+              }`}
+              title={isMicMuted ? 'Nyalakan Mikrofon' : 'Matikan Mikrofon'}
+            >
+              {isMicMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </button>
 
-          {/* Mic Toggle */}
-          <button
-            onClick={toggleAudio}
-            className={`p-3 rounded-full transition cursor-pointer ${
-              isAudioMuted
-                ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40 hover:bg-rose-500/30'
-                : 'bg-slate-800/80 text-white hover:bg-slate-700'
-            }`}
-            title={isAudioMuted ? 'Nyalakan Mikrofon' : 'Matikan Mikrofon'}
-          >
-            {isAudioMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-          </button>
+            {/* Cam Toggle */}
+            <button
+              onClick={toggleCam}
+              className={`w-10 h-10 rounded-full flex items-center justify-center transition cursor-pointer border ${
+                isCamOff
+                  ? 'bg-rose-500/20 text-rose-400 border-rose-500/40 hover:bg-rose-500/30'
+                  : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
+              }`}
+              title={isCamOff ? 'Nyalakan Kamera' : 'Matikan Kamera'}
+            >
+              {isCamOff ? <CameraOff className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
+            </button>
 
-          {/* Camera Toggle */}
-          <button
-            onClick={toggleVideo}
-            className={`p-3 rounded-full transition cursor-pointer ${
-              isVideoOff
-                ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40 hover:bg-rose-500/30'
-                : 'bg-slate-800/80 text-white hover:bg-slate-700'
-            }`}
-            title={isVideoOff ? 'Nyalakan Kamera' : 'Matikan Kamera'}
-          >
-            {isVideoOff ? <CameraOff className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
-          </button>
+            {/* Balik Kamera Depan / Belakang (HP) */}
+            <button
+              onClick={switchCameraFacing}
+              className="w-10 h-10 rounded-full bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700 flex items-center justify-center transition cursor-pointer"
+              title="Balik Kamera Depan / Belakang"
+            >
+              <RefreshCw className="w-4 h-4 text-sky-400" />
+            </button>
 
-          {/* Remote Speaker Audio Toggle */}
-          <button
-            onClick={toggleRemoteAudio}
-            className={`p-3 rounded-full transition cursor-pointer ${
-              isRemoteAudioMuted
-                ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40 hover:bg-rose-500/30'
-                : 'bg-slate-800/80 text-white hover:bg-slate-700'
-            }`}
-            title={isRemoteAudioMuted ? 'Nyalakan Suara Partner' : 'Bisukan Suara Partner'}
-          >
-            {isRemoteAudioMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-          </button>
+            {/* Virtual Test Feed Fallback */}
+            <button
+              onClick={() => initMedia(!isSimulatedStream)}
+              className="w-10 h-10 rounded-full bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700 flex items-center justify-center transition cursor-pointer"
+              title={isSimulatedStream ? 'Beralih ke Kamera Fisik' : 'Beralih ke Virtual Feed'}
+            >
+              <Sparkles className="w-4 h-4 text-indigo-400" />
+            </button>
 
-          {/* Ganti Peran Peserta 1 / 2 */}
-          <button
-            onClick={onSwitchRole}
-            className="p-3 rounded-full bg-slate-800/80 text-white hover:bg-slate-700 transition cursor-pointer"
-            title="Tukar Peran (Peserta 1 / Peserta 2)"
-          >
-            <RotateCcw className="w-5 h-5" />
-          </button>
+            {/* End Call Button */}
+            <button
+              onClick={handleExitCall}
+              className="w-10 h-10 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center transition cursor-pointer shadow-lg shadow-rose-600/40 active:scale-95"
+              title="Akhiri Panggilan"
+            >
+              <PhoneOff className="w-4 h-4" />
+            </button>
+
+          </div>
         </div>
+
       </div>
+
     </div>
   );
 };

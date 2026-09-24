@@ -66,10 +66,9 @@ export const TwoScreenVideoCall: React.FC<VideoCallProps> = ({ role, onExit, onS
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { 
             facingMode: targetFacing,
-            width: { ideal: 720 }, 
-            height: { ideal: 1280 },
-            aspectRatio: { ideal: 9 / 16 }
-          },
+            width: { ideal: 1280 }, 
+            height: { ideal: 720 }
+            },,
           audio: true
         });
 
@@ -437,7 +436,7 @@ export const TwoScreenVideoCall: React.FC<VideoCallProps> = ({ role, onExit, onS
                 ref={remoteVideoRef}
                 autoPlay
                 playsInline
-                className="w-full h-full object-cover"
+                className="w-full h-full object-contain"
               />
               
               {!isP2PConnected && (
@@ -464,7 +463,7 @@ export const TwoScreenVideoCall: React.FC<VideoCallProps> = ({ role, onExit, onS
                 autoPlay
                 playsInline
                 muted
-                className={`w-full h-full object-cover ${facingMode === 'user' ? '-scale-x-100' : ''}`}
+                className={`w-full h-full object-contain ${facingMode === 'user' ? '-scale-x-100' : ''}`}
               />
               {(!hasMedia || isCamOff) && (
                 <div className="absolute inset-0 bg-slate-950 flex flex-col items-center justify-center text-slate-400 gap-2">
@@ -498,7 +497,7 @@ export const TwoScreenVideoCall: React.FC<VideoCallProps> = ({ role, onExit, onS
               ref={remoteVideoRef}
               autoPlay
               playsInline
-              className="w-full h-full object-cover"
+              className="w-full h-full object-contain"
             />
           ) : (
             // Default: PiP = Kamera Lokal Anda Sendiri
@@ -508,7 +507,7 @@ export const TwoScreenVideoCall: React.FC<VideoCallProps> = ({ role, onExit, onS
                 autoPlay
                 playsInline
                 muted
-                className={`w-full h-full object-cover ${facingMode === 'user' ? '-scale-x-100' : ''}`}
+                className={`w-full h-full object-contain ${facingMode === 'user' ? '-scale-x-100' : ''}`}
               />
               {(!hasMedia || isCamOff) && (
                 <div className="absolute inset-0 bg-slate-950 flex flex-col items-center justify-center text-slate-500">

@@ -68,7 +68,7 @@ export const TwoScreenVideoCall: React.FC<VideoCallProps> = ({ role, onExit, onS
             facingMode: targetFacing,
             width: { ideal: 1280 }, 
             height: { ideal: 720 }
-            },,
+            },
           audio: true
         });
 
